@@ -497,6 +497,11 @@ def render_index_items(title: str, items: list[dict[str, Any]], *, kind: str, em
                 if item.get("jumpUrl"):
                     st.markdown(f"[原文链接]({item['jumpUrl']})")
 
+            if kind == "news" and item.get("source"):
+                st.write(f"**资讯来源**：{item['source']}")
+            elif kind == "ref":
+                st.caption("研报引用通常只返回标题、引用方式和结构化摘录，不一定带单独的来源站点字段。")
+
             if item.get("markdown"):
                 st.write("**结构化表格**")
                 st.markdown(item["markdown"])
@@ -504,7 +509,7 @@ def render_index_items(title: str, items: list[dict[str, Any]], *, kind: str, em
             if item.get("summaryContent"):
                 st.write("**摘要**")
                 st.markdown(str(item["summaryContent"]))
-            if item.get("title") and item.get("type") == "news":
+            if item.get("title"):
                 st.write("**标题**")
                 st.write(item["title"])
             st.write("**原始数据**")
@@ -788,7 +793,7 @@ def render_app() -> None:
 
     with st.sidebar:
         st.header("请求配置")
-        demo_name = st.selectbox("展示案例", list(DEMO_CASES.keys()), index=2)
+        demo_name = st.selectbox("展示案例", list(DEMO_CASES.keys()), index=4)
         demo = DEMO_CASES[demo_name]
         api_key = st.text_input(
             "API Key",
