@@ -367,6 +367,10 @@ def build_chart_preview(chart_config: Any) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(chart_config, dict):
         return "图表配置不是对象，直接展示原始内容。", []
 
+    content_rows = chart_config.get("content")
+    if isinstance(content_rows, list) and content_rows and isinstance(content_rows[0], dict):
+        return "图表配置包含 content 列表，已转成表格预览。", content_rows[:20]
+
     direct_rows = chart_config.get("data") or chart_config.get("rows") or chart_config.get("points")
     if isinstance(direct_rows, list) and direct_rows and isinstance(direct_rows[0], dict):
         return "图表配置里包含表格式数据，下面先展示前几行。", direct_rows[:20]
@@ -484,33 +488,43 @@ def render_graph_events(events: list[dict[str, Any]]) -> None:
 
     for idx, event in enumerate(events, start=1):
         with st.expander(f"图表消息 {idx}", expanded=False):
-            graph_type = event.get("graphType", "-")
-            charts_config = event.get("chartsConfig")
+            graph_data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            if not isinstance(graph_data, dict):
+                graph_data = {}
+            graph_type = graph_data.get("graphType") or event.get("graphType") or "-"
+            charts_config = graph_data.get("chartsConfig") if "chartsConfig" in graph_data else event.get("chartsConfig")
             st.write(f"**图表类型**：{graph_type}")
             if isinstance(charts_config, dict):
                 note, preview_rows = build_chart_preview(charts_config)
                 st.info(note)
-                if preview_rows and pd is not None:
-                    try:
-                        frame = pd.DataFrame(preview_rows)
-                        st.dataframe(frame, use_container_width=True, hide_index=True)
-                        numeric_columns = [
-                            col for col in frame.columns if pd.api.types.is_numeric_dtype(frame[col])
-                        ]
-                        if numeric_columns:
-                            st.caption("图表预览")
-                            st.line_chart(frame.set_index(frame.columns[0])[numeric_columns])
-                    except Exception:
-                        st.code(json.dumps(preview_rows, ensure_ascii=False, indent=2), language="json")
+                if graph_type == "QUOTE" and isinstance(charts_config.get("content"), list):
+                    quote_rows = charts_config.get("content", [])
+                    st.write("**标的列表**")
+                    st.dataframe(quote_rows, use_container_width=True, hide_index=True)
                 elif preview_rows:
-                    st.code(json.dumps(preview_rows, ensure_ascii=False, indent=2), language="json")
+                    if pd is not None:
+                        try:
+                            frame = pd.DataFrame(preview_rows)
+                            st.dataframe(frame, use_container_width=True, hide_index=True)
+                            numeric_columns = [
+                                col for col in frame.columns if pd.api.types.is_numeric_dtype(frame[col])
+                            ]
+                            if numeric_columns and len(frame.columns) > 0:
+                                st.caption("图表预览")
+                                st.line_chart(frame.set_index(frame.columns[0])[numeric_columns])
+                        except Exception:
+                            st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+                    else:
+                        st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+                elif isinstance(charts_config.get("content"), list):
+                    st.code(json.dumps(charts_config["content"], ensure_ascii=False, indent=2), language="json")
                 st.write("**chartsConfig**")
                 st.code(json.dumps(charts_config, ensure_ascii=False, indent=2), language="json")
             else:
                 st.write("**chartsConfig**")
                 st.json(charts_config)
             st.write("**原始图表事件**")
-            st.json(event)
+            st.json(graph_data or event)
 
 
 def render_stream_state(latest: dict[str, Any], show_raw: bool, debug_mode: bool) -> None:
