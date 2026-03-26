@@ -793,7 +793,7 @@ def render_app() -> None:
 
     with st.sidebar:
         st.header("请求配置")
-        demo_name = st.selectbox("展示案例", list(DEMO_CASES.keys()), index=4)
+        demo_name = st.selectbox("展示案例", list(DEMO_CASES.keys()), index=5)
         demo = DEMO_CASES[demo_name]
         api_key = st.text_input(
             "API Key",
@@ -818,6 +818,8 @@ def render_app() -> None:
                 disabled=True,
             )
         st.caption(ENDPOINT_SPECS[endpoint_key].description)
+        if endpoint_key != "scenario_news":
+            st.info("资讯溯源主要看“资讯总结（热点发现/行业消息/股票消息）”这类场景。当前示例如果不返回 NEWS_INDEX 属正常情况。")
         values = build_form_values(endpoint_key, demo if demo_name != "自定义" else None)
 
         custom_json = st.checkbox("使用自定义 JSON 覆盖", value=False)
