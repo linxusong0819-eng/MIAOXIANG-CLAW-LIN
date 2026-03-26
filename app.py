@@ -10,6 +10,14 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 st = None
+pd = None
+
+try:
+    import pandas as _pd
+except ImportError:
+    _pd = None
+else:
+    pd = _pd
 
 API_BASE = "https://ai-saas.eastmoney.com"
 DEFAULT_API_KEY = ""
@@ -331,32 +339,140 @@ def shorten(text: Any, limit: int = 120) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
+def safe_link(url: Any) -> str:
+    value = "" if url is None else str(url).strip()
+    if not value:
+        return ""
+    return value
+
+
+def build_reference_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        rows.append(
+            {
+                "refId": item.get("refId", "-"),
+                "type": item.get("type", "-"),
+                "referenceType": item.get("referenceType", "-"),
+                "title": item.get("title", "") or item.get("name", "") or "-",
+                "jumpUrl": safe_link(item.get("jumpUrl")),
+                "hasMarkdown": bool(item.get("markdown")),
+                "publishDate": item.get("publishDate", item.get("date", "")),
+            }
+        )
+    return rows
+
+
+def build_chart_preview(chart_config: Any) -> tuple[str, list[dict[str, Any]]]:
+    if not isinstance(chart_config, dict):
+        return "图表配置不是对象，直接展示原始内容。", []
+
+    direct_rows = chart_config.get("data") or chart_config.get("rows") or chart_config.get("points")
+    if isinstance(direct_rows, list) and direct_rows and isinstance(direct_rows[0], dict):
+        return "图表配置里包含表格式数据，下面先展示前几行。", direct_rows[:20]
+
+    x_candidates = (
+        chart_config.get("xAxis"),
+        chart_config.get("categories"),
+        chart_config.get("xData"),
+        chart_config.get("labels"),
+        chart_config.get("dimension"),
+    )
+    categories: list[Any] = []
+    for candidate in x_candidates:
+        if isinstance(candidate, dict):
+            for key in ("data", "categories", "values"):
+                value = candidate.get(key)
+                if isinstance(value, list):
+                    categories = value
+                    break
+        elif isinstance(candidate, list):
+            if candidate and isinstance(candidate[0], dict):
+                for key in ("data", "categories", "values"):
+                    value = candidate[0].get(key)
+                    if isinstance(value, list):
+                        categories = value
+                        break
+            else:
+                categories = candidate
+        if categories:
+            break
+
+    series_value = chart_config.get("series")
+    if not categories or not isinstance(series_value, list) or not series_value:
+        return "当前图表配置无法自动还原成预览表，保留原始 JSON 方便核对。", []
+
+    rows: list[dict[str, Any]] = []
+    for idx, series_item in enumerate(series_value, start=1):
+        if not isinstance(series_item, dict):
+            continue
+        data = series_item.get("data")
+        if not isinstance(data, list) or not data:
+            continue
+        series_name = series_item.get("name") or f"series_{idx}"
+        if not rows:
+            for cat in categories[: len(data)]:
+                rows.append({"类别": cat})
+        if len(rows) != len(data):
+            rows = []
+            break
+        for row, value in zip(rows, data):
+            row[series_name] = value
+
+    if rows:
+        return "图表配置看起来像分类序列数据，已自动转成预览表。", rows
+
+    return "图表配置无法稳定映射成表格预览，保留原始 JSON。", []
+
+
 def render_index_items(title: str, items: list[dict[str, Any]], *, kind: str, empty_tip: str) -> None:
     st.subheader(title)
     if not items:
         st.info(empty_tip)
         return
 
-    table_rows: list[dict[str, Any]] = []
-    for item in items:
-        table_rows.append(
-            {
-                "refId": item.get("refId", "-"),
-                "type": item.get("type", "-"),
-                "referenceType": item.get("referenceType", "-"),
-                "title": item.get("title", "") or item.get("name", ""),
-                "jumpUrl": item.get("jumpUrl", ""),
-                "markdown": shorten(item.get("markdown", ""), 80),
-                "source": shorten(item.get("source", ""), 40),
-                "publishDate": item.get("publishDate", item.get("date", "")),
-            }
-        )
+    direct_count = sum(1 for item in items if str(item.get("referenceType", "")).upper() == "CITED_REFERENCE")
+    extended_count = sum(1 for item in items if str(item.get("referenceType", "")).upper() == "OTHER_REFERENCE")
+    markdown_count = sum(1 for item in items if item.get("markdown"))
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("引用数", len(items))
+    with c2:
+        st.metric("直接引用", direct_count)
+    with c3:
+        st.metric("扩展引用", extended_count)
+    with c4:
+        st.metric("含表格", markdown_count)
 
+    table_rows = build_reference_rows(items)
     st.dataframe(table_rows, use_container_width=True, hide_index=True)
 
     for idx, item in enumerate(items, start=1):
         item_title = item.get("title") or item.get("name") or f"{kind} {idx}"
         with st.expander(f"{idx}. {item_title}", expanded=False):
+            top = st.columns([1.35, 1, 1])
+            with top[0]:
+                st.write(f"**引用编号**：{item.get('refId', '-')}")
+                st.write(f"**来源类型**：{item.get('type', '-')}")
+            with top[1]:
+                st.write(f"**引用方式**：{item.get('referenceType', '-')}")
+                st.write(f"**是否表格**：{'是' if item.get('markdown') else '否'}")
+            with top[2]:
+                st.write(f"**发布日期**：{item.get('publishDate', item.get('date', '-')) or '-'}")
+                if item.get("jumpUrl"):
+                    st.markdown(f"[原文链接]({item['jumpUrl']})")
+
+            if item.get("markdown"):
+                st.write("**结构化表格**")
+                st.markdown(item["markdown"])
+                st.code(item["markdown"], language="markdown")
+            if item.get("summaryContent"):
+                st.write("**摘要**")
+                st.markdown(str(item["summaryContent"]))
+            if item.get("title") and item.get("type") == "news":
+                st.write("**标题**")
+                st.write(item["title"])
+            st.write("**原始数据**")
             st.json(item)
 
 
@@ -368,10 +484,33 @@ def render_graph_events(events: list[dict[str, Any]]) -> None:
 
     for idx, event in enumerate(events, start=1):
         with st.expander(f"图表消息 {idx}", expanded=False):
+            graph_type = event.get("graphType", "-")
+            charts_config = event.get("chartsConfig")
+            st.write(f"**图表类型**：{graph_type}")
+            if isinstance(charts_config, dict):
+                note, preview_rows = build_chart_preview(charts_config)
+                st.info(note)
+                if preview_rows and pd is not None:
+                    try:
+                        frame = pd.DataFrame(preview_rows)
+                        st.dataframe(frame, use_container_width=True, hide_index=True)
+                        numeric_columns = [
+                            col for col in frame.columns if pd.api.types.is_numeric_dtype(frame[col])
+                        ]
+                        if numeric_columns:
+                            st.caption("图表预览")
+                            st.line_chart(frame.set_index(frame.columns[0])[numeric_columns])
+                    except Exception:
+                        st.code(json.dumps(preview_rows, ensure_ascii=False, indent=2), language="json")
+                elif preview_rows:
+                    st.code(json.dumps(preview_rows, ensure_ascii=False, indent=2), language="json")
+                st.write("**chartsConfig**")
+                st.code(json.dumps(charts_config, ensure_ascii=False, indent=2), language="json")
+            else:
+                st.write("**chartsConfig**")
+                st.json(charts_config)
+            st.write("**原始图表事件**")
             st.json(event)
-            if isinstance(event.get("chartsConfig"), dict):
-                st.caption("chartsConfig")
-                st.code(json.dumps(event["chartsConfig"], ensure_ascii=False, indent=2), language="json")
 
 
 def render_stream_state(latest: dict[str, Any], show_raw: bool, debug_mode: bool) -> None:
