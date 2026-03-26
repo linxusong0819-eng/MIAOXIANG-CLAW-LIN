@@ -1,44 +1,169 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
-try:
-    import streamlit as st
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit("请先安装 streamlit：pip install -r requirements.txt") from exc
+st = None
 
-
-API_URL = "https://ai-saas.eastmoney.com/poc/stream/ask"
-MAX_HISTORY = 5
+API_BASE = "https://ai-saas.eastmoney.com"
+DEFAULT_API_KEY = ""
+MAX_HISTORY = 8
 
 
-def get_api_key(user_value: str = "") -> str:
-    value = user_value.strip()
-    if value:
-        return value
+@dataclass(frozen=True)
+class EndpointSpec:
+    key: str
+    label: str
+    path: str
+    mode: str
+    description: str
+
+
+ENDPOINT_SPECS: dict[str, EndpointSpec] = {
+    "stream_ask": EndpointSpec(
+        key="stream_ask",
+        label="流式智能问答 /poc/stream/ask",
+        path="/poc/stream/ask",
+        mode="stream",
+        description="流式输出、支持多轮、溯源、思考模型和图表消息。",
+    ),
+    "ask": EndpointSpec(
+        key="ask",
+        label="一次性智能问答 /poc/ask",
+        path="/poc/ask",
+        mode="json",
+        description="一次性返回回答和溯源，适合和流式版本做对比。",
+    ),
+    "security": EndpointSpec(
+        key="security",
+        label="股票诊断 /poc/stream/security",
+        path="/poc/stream/security",
+        mode="stream",
+        description="支持基本面、技术面、消息面、估值面、机构面、研报观点。",
+    ),
+    "tougu_company": EndpointSpec(
+        key="tougu_company",
+        label="股票涨跌分析 /poc/stream/tougu-company",
+        path="/poc/stream/tougu-company",
+        mode="stream",
+        description="分析个股涨跌原因，适合和资讯溯源一起展示。",
+    ),
+    "tougu_block": EndpointSpec(
+        key="tougu_block",
+        label="行业/概念涨跌 /poc/stream/tougu-block",
+        path="/poc/stream/tougu-block",
+        mode="stream",
+        description="分析板块动因，适合展示行业热点和引用来源。",
+    ),
+    "scenario_news": EndpointSpec(
+        key="scenario_news",
+        label="资讯类场景总结 /poc/stream/scenario-news",
+        path="/poc/stream/scenario-news",
+        mode="stream",
+        description="热点发现、行业消息、股票消息三类场景。",
+    ),
+}
+
+
+def ensure_streamlit_loaded() -> Any | None:
+    global st
+    if st is None:
+        try:
+            import streamlit as _st
+        except ImportError:
+            return None
+        st = _st
+    return st
+
+
+def get_default_api_key() -> str:
+    if DEFAULT_API_KEY:
+        return DEFAULT_API_KEY
 
     env_value = os.getenv("EM_API_KEY", "").strip()
     if env_value:
         return env_value
 
-    try:
-        return str(st.secrets.get("EM_API_KEY", "")).strip()
-    except Exception:
-        return ""
+    st_mod = ensure_streamlit_loaded()
+    if st_mod is not None:
+        try:
+            return str(st_mod.secrets.get("EM_API_KEY", "")).strip()
+        except Exception:
+            return ""
+
+    return ""
 
 
-def build_payload(question: str, deep_think: bool, channel_id: str) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "question": question.strip(),
-        "deepThink": deep_think,
+def build_headers(api_key: str) -> dict[str, str]:
+    return {
+        "em_api_key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+        "Cache-Control": "no-cache",
     }
-    if channel_id.strip():
-        payload["channelId"] = channel_id.strip()
-    return payload
+
+
+def build_payload(endpoint_key: str, values: dict[str, Any]) -> dict[str, Any]:
+    if endpoint_key == "stream_ask":
+        payload: dict[str, Any] = {
+            "question": values.get("question", "").strip(),
+            "deepThink": bool(values.get("deepThink", False)),
+        }
+        channel_id = values.get("channelId", "").strip()
+        if channel_id:
+            payload["channelId"] = channel_id
+        return payload
+
+    if endpoint_key == "ask":
+        return {
+            "question": values.get("question", "").strip(),
+            "deepThink": bool(values.get("deepThink", False)),
+        }
+
+    if endpoint_key == "security":
+        payload = {
+            "entity": values.get("entity", "").strip(),
+            "type": int(values.get("type", 1)),
+        }
+        industry = values.get("industry")
+        if industry is not None and industry != "":
+            payload["industry"] = int(industry)
+        return payload
+
+    if endpoint_key == "tougu_company":
+        payload = {"entity": values.get("entity", "").strip()}
+        industry = values.get("industry")
+        if industry is not None and industry != "":
+            payload["industry"] = int(industry)
+        return payload
+
+    if endpoint_key == "tougu_block":
+        payload = {"entity": values.get("entity", "").strip()}
+        industry = values.get("industry")
+        if industry is not None and industry != "":
+            payload["industry"] = int(industry)
+        return payload
+
+    if endpoint_key == "scenario_news":
+        payload = {"scenario": int(values.get("scenario", 1))}
+        entity = values.get("entity", "").strip()
+        if entity:
+            payload["entity"] = entity
+        news_type = values.get("type")
+        if news_type not in (None, ""):
+            payload["type"] = int(news_type)
+        info_type = values.get("infoType", "").strip()
+        if info_type:
+            payload["infoType"] = info_type
+        return payload
+
+    raise ValueError(f"未知接口: {endpoint_key}")
 
 
 def parse_event_line(line: str) -> dict[str, Any] | None:
@@ -54,23 +179,12 @@ def parse_event_line(line: str) -> dict[str, Any] | None:
     return event if isinstance(event, dict) else None
 
 
-def fetch_stream(api_key: str, question: str, deep_think: bool, channel_id: str) -> dict[str, Any]:
-    payload = build_payload(question, deep_think, channel_id)
-    request = urllib.request.Request(
-        API_URL,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={
-            "em_api_key": api_key,
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "Cache-Control": "no-cache",
-        },
-    )
-
-    state: dict[str, Any] = {
+def new_state(endpoint_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "endpoint_key": endpoint_key,
         "payload": payload,
         "http_status": None,
+        "response_headers": {},
         "channel_id": "",
         "q_id": "",
         "trace_id": "",
@@ -81,12 +195,35 @@ def fetch_stream(api_key: str, question: str, deep_think: bool, channel_id: str)
         "news_index_list": [],
         "graph_events": [],
         "raw_events": [],
+        "debug_messages": [],
+        "display_data": "",
+        "code": None,
+        "message": "",
         "error": "",
     }
+
+
+def stream_request(
+    api_key: str,
+    endpoint_key: str,
+    payload: dict[str, Any],
+    *,
+    debug: bool = False,
+    on_event: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    spec = ENDPOINT_SPECS[endpoint_key]
+    state = new_state(endpoint_key, payload)
+    request = urllib.request.Request(
+        API_BASE + spec.path,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers=build_headers(api_key),
+    )
 
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             state["http_status"] = response.status
+            state["response_headers"] = dict(response.headers.items())
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="ignore").strip()
                 event = parse_event_line(line)
@@ -95,6 +232,11 @@ def fetch_stream(api_key: str, question: str, deep_think: bool, channel_id: str)
 
                 state["raw_events"].append(event)
                 message_type = event.get("messageType", "")
+
+                if debug:
+                    state["debug_messages"].append(
+                        {"messageType": message_type, "keys": sorted(event.keys())}
+                    )
 
                 if message_type == "METADATA":
                     state["channel_id"] = event.get("channelId", "") or state["channel_id"]
@@ -114,6 +256,51 @@ def fetch_stream(api_key: str, question: str, deep_think: bool, channel_id: str)
                     state["trace_id"] = event.get("traceId", "") or state["trace_id"]
                 elif message_type == "ERROR":
                     state["error"] = event.get("reason", "接口返回错误")
+
+                if on_event:
+                    on_event(event, state)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        state["error"] = f"HTTP {exc.code}: {exc.reason}\n{body}"
+    except urllib.error.URLError as exc:
+        state["error"] = f"请求失败: {exc.reason}"
+
+    return state
+
+
+def json_request(api_key: str, endpoint_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    spec = ENDPOINT_SPECS[endpoint_key]
+    state = new_state(endpoint_key, payload)
+    request = urllib.request.Request(
+        API_BASE + spec.path,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={"em_api_key": api_key, "Content-Type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            state["http_status"] = response.status
+            state["response_headers"] = dict(response.headers.items())
+            data = json.loads(response.read().decode("utf-8", errors="ignore"))
+            if isinstance(data, dict):
+                state["raw_events"].append(data)
+                state["code"] = data.get("code")
+                state["message"] = data.get("message", "")
+                if data.get("aiName"):
+                    state["response_headers"]["aiName"] = data.get("aiName")
+                if data.get("org"):
+                    state["response_headers"]["org"] = data.get("org")
+                core = data.get("data") or {}
+                if isinstance(core, dict):
+                    state["display_data"] = str(core.get("displayData", ""))
+                    state["ref_index_list"] = list(core.get("refIndexList", []) or [])
+                if not state["message"]:
+                    state["message"] = "success" if state["code"] in (200, "200") else ""
+                if state["code"] not in (None, 200, "200") and not state["error"]:
+                    state["error"] = state["message"] or "接口返回非 200"
+            else:
+                state["error"] = "接口返回内容不是 JSON 对象"
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="ignore")
         state["error"] = f"HTTP {exc.code}: {exc.reason}\n{body}"
@@ -138,49 +325,256 @@ def split_think_block(text: str) -> tuple[str, str, str]:
     return before, think, after
 
 
-def render_sources(title: str, items: list[dict[str, Any]], empty_tip: str) -> None:
+def shorten(text: Any, limit: int = 120) -> str:
+    value = "" if text is None else str(text)
+    value = " ".join(value.split())
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def render_index_items(title: str, items: list[dict[str, Any]], *, kind: str, empty_tip: str) -> None:
     st.subheader(title)
     if not items:
         st.info(empty_tip)
         return
 
+    table_rows: list[dict[str, Any]] = []
+    for item in items:
+        table_rows.append(
+            {
+                "refId": item.get("refId", "-"),
+                "type": item.get("type", "-"),
+                "referenceType": item.get("referenceType", "-"),
+                "title": item.get("title", "") or item.get("name", ""),
+                "jumpUrl": item.get("jumpUrl", ""),
+                "markdown": shorten(item.get("markdown", ""), 80),
+                "source": shorten(item.get("source", ""), 40),
+                "publishDate": item.get("publishDate", item.get("date", "")),
+            }
+        )
+
+    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+
     for idx, item in enumerate(items, start=1):
-        item_title = item.get("title") or item.get("name") or f"来源 {idx}"
+        item_title = item.get("title") or item.get("name") or f"{kind} {idx}"
         with st.expander(f"{idx}. {item_title}", expanded=False):
-            st.write("**类型**")
-            st.write(item.get("type", "-"))
-            st.write("**编号**")
-            st.write(item.get("refId", item.get("code", "-")))
-            st.write("**引用方式**")
-            st.write(item.get("referenceType", item.get("source", "-")))
-            st.write("**发布时间**")
-            st.write(item.get("publishDate", item.get("date", "-")))
-            if item.get("jumpUrl"):
-                st.write("**链接**")
-                st.write(item["jumpUrl"])
-            if item.get("summaryContent"):
-                st.write("**摘要**")
-                st.write(item["summaryContent"])
-            if item.get("markdown"):
-                st.code(item["markdown"], language="markdown")
+            st.json(item)
 
 
 def render_graph_events(events: list[dict[str, Any]]) -> None:
     st.subheader("图表消息")
     if not events:
-        st.info("当前没有返回图表类消息。")
+        st.info("当前没有返回图表消息。")
         return
 
     for idx, event in enumerate(events, start=1):
         with st.expander(f"图表消息 {idx}", expanded=False):
             st.json(event)
+            if isinstance(event.get("chartsConfig"), dict):
+                st.caption("chartsConfig")
+                st.code(json.dumps(event["chartsConfig"], ensure_ascii=False, indent=2), language="json")
 
 
-def main() -> None:
-    st.set_page_config(page_title="妙想流式接口演示", page_icon="🧠", layout="wide")
+def render_stream_state(latest: dict[str, Any], show_raw: bool, debug_mode: bool) -> None:
+    final_text = latest.get("final_text") or merge_text(latest.get("text_chunks", []))
+    st.write("**请求体**")
+    st.code(json.dumps(latest.get("payload", {}), ensure_ascii=False, indent=2), language="json")
 
-    st.title("妙想流式接口演示")
-    st.caption("支持流式输出、研报/资讯溯源和多轮对话；密钥通过 Secrets 或环境变量读取，不写死在代码里。")
+    st.write("**会话信息**")
+    st.json(
+        {
+            "httpStatus": latest.get("http_status"),
+            "channelId": latest.get("channel_id", ""),
+            "qId": latest.get("q_id", ""),
+            "traceId": latest.get("trace_id", ""),
+            "warning": latest.get("warning", ""),
+            "endpoint": latest.get("endpoint_key", ""),
+        }
+    )
+
+    if latest.get("error"):
+        st.error(latest["error"])
+
+    if final_text:
+        answer, think_text, tail = split_think_block(final_text)
+        merged_answer = " ".join(part for part in [answer, tail] if part).strip()
+        if think_text:
+            st.write("**思考内容**")
+            st.info(think_text)
+            st.write("**最终回答**")
+            st.markdown(merged_answer or "(没有可显示的最终回答)")
+        else:
+            st.write("**最终回答**")
+            st.markdown(final_text)
+    else:
+        st.info("还没有收到可展示的文本内容。")
+
+    with st.expander("流式片段", expanded=False):
+        st.code("\n".join(latest.get("text_chunks", [])) or "(暂无片段)", language="text")
+
+    st.download_button(
+        "下载本次 JSON",
+        data=json.dumps(latest, ensure_ascii=False, indent=2),
+        file_name="miaoxiang_result.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    if show_raw:
+        with st.expander("原始事件", expanded=False):
+            st.json(latest.get("raw_events", []))
+
+    if debug_mode:
+        with st.expander("调试信息", expanded=False):
+            st.json(
+                {
+                    "debugMessages": latest.get("debug_messages", []),
+                    "responseHeaders": latest.get("response_headers", {}),
+                }
+            )
+
+
+def render_json_state(latest: dict[str, Any], show_raw: bool) -> None:
+    st.write("**请求体**")
+    st.code(json.dumps(latest.get("payload", {}), ensure_ascii=False, indent=2), language="json")
+
+    st.write("**返回摘要**")
+    st.json(
+        {
+            "httpStatus": latest.get("http_status"),
+            "code": latest.get("code"),
+            "message": latest.get("message", ""),
+            "endpoint": latest.get("endpoint_key", ""),
+        }
+    )
+
+    if latest.get("error"):
+        st.error(latest["error"])
+
+    if latest.get("display_data"):
+        st.write("**displayData**")
+        st.markdown(latest["display_data"])
+    else:
+        st.info("没有拿到 displayData。")
+
+    with st.expander("溯源列表", expanded=False):
+        st.json(latest.get("ref_index_list", []))
+
+    st.download_button(
+        "下载本次 JSON",
+        data=json.dumps(latest, ensure_ascii=False, indent=2),
+        file_name="miaoxiang_result.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    if show_raw:
+        with st.expander("原始响应", expanded=False):
+            st.json(latest.get("raw_events", []))
+
+
+def build_form_values(endpoint_key: str) -> dict[str, Any]:
+    if endpoint_key in {"stream_ask", "ask"}:
+        return {
+            "question": st.text_area(
+                "问题",
+                value="请总结东方财富近3个月的研报核心观点，并给出投资建议和风险提示",
+                height=140,
+            ),
+            "deepThink": st.checkbox("开启深度思考", value=True),
+            "channelId": st.text_input(
+                "channelId（流式多轮可选）",
+                value=st.session_state.get("last_channel_id", ""),
+            ),
+        }
+
+    if endpoint_key == "security":
+        type_options = {
+            "1 - 基本面": 1,
+            "2 - 技术面": 2,
+            "3 - 消息面": 3,
+            "4 - 估值面": 4,
+            "5 - 机构面": 5,
+            "6 - 研报观点": 6,
+        }
+        industry_options = {
+            "0 / null - 申万行业": 0,
+            "1 - 财富通行业": 1,
+        }
+        type_label = st.selectbox("type", list(type_options.keys()), index=0)
+        industry_label = st.selectbox("industry", list(industry_options.keys()), index=0)
+        return {
+            "entity": st.text_input("entity", value="603391"),
+            "type": type_options[type_label],
+            "industry": industry_options[industry_label],
+        }
+
+    if endpoint_key == "tougu_company":
+        industry_options = {
+            "0 / null - 申万行业": 0,
+            "1 - 财富通行业": 1,
+        }
+        industry_label = st.selectbox("industry", list(industry_options.keys()), index=0)
+        return {
+            "entity": st.text_input("entity", value="603391"),
+            "industry": industry_options[industry_label],
+        }
+
+    if endpoint_key == "tougu_block":
+        industry_options = {
+            "0 / null - 申万行业": 0,
+            "1 - 财富通概念板块": 1,
+        }
+        industry_label = st.selectbox("industry", list(industry_options.keys()), index=0)
+        return {
+            "entity": st.text_input("entity", value="半导体"),
+            "industry": industry_options[industry_label],
+        }
+
+    if endpoint_key == "scenario_news":
+        scenario_map = {
+            "1 - 热点发现": 1,
+            "2 - 行业消息": 2,
+            "3 - 股票消息": 3,
+        }
+        scenario_label = st.selectbox("scenario", list(scenario_map.keys()), index=0)
+        scenario_value = scenario_map[scenario_label]
+        payload: dict[str, Any] = {"scenario": scenario_value}
+        if scenario_value in (2, 3):
+            payload["entity"] = st.text_input("entity", value="东方财富")
+        if scenario_value == 1:
+            type_map = {
+                "1 - 热门资讯": 1,
+                "2 - 热门话题": 2,
+                "3 - 热门个股": 3,
+                "4 - 热门板块": 4,
+            }
+            type_label = st.selectbox("type", list(type_map.keys()), index=0)
+            payload["type"] = type_map[type_label]
+            payload["infoType"] = st.text_input(
+                "infoType（可选，热门资讯时可限制 overseas）",
+                value="",
+            )
+        return payload
+
+    raise ValueError(f"未知接口: {endpoint_key}")
+
+
+def render_app() -> None:
+    st.set_page_config(page_title="妙想流式接口展示台", page_icon="🧭", layout="wide")
+
+    st.markdown(
+        """
+        <style>
+        .block-container { padding-top: 1rem; padding-bottom: 2rem; }
+        section[data-testid="stSidebar"] { width: 360px; }
+        .small-muted { color: #667085; font-size: 0.92rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.title("妙想流式接口展示台")
+    st.caption("流式问答、溯源、图表和文档里的常用接口都放在这里，适合本地调试和演示。")
 
     if "history" not in st.session_state:
         st.session_state.history = []
@@ -190,135 +584,288 @@ def main() -> None:
         st.session_state.last_result = None
 
     with st.sidebar:
-        st.header("请求参数")
-        api_key_input = st.text_input(
-            "API Key（可留空，优先读 Secrets/环境变量）",
-            value="",
+        st.header("请求配置")
+        api_key = st.text_input(
+            "API Key",
+            value=get_default_api_key(),
             type="password",
+            help="本地默认会预填你提供的 key；部署到云端时请改用 Secrets。",
         )
-        question = st.text_area(
-            "问题",
-            value="请总结东方财富近3个月的研报核心观点，并给出投资建议和风险提示",
-            height=120,
+        endpoint_key = st.selectbox(
+            "接口",
+            list(ENDPOINT_SPECS.keys()),
+            format_func=lambda key: ENDPOINT_SPECS[key].label,
+            index=0,
         )
-        deep_think = st.checkbox("开启深度思考", value=True)
-        channel_id = st.text_input(
-            "channelId（多轮对话可填上一轮返回值）",
-            value=st.session_state.last_channel_id,
-        )
-        show_raw = st.checkbox("显示原始事件", value=True)
-        run_btn = st.button("开始请求", type="primary", use_container_width=True)
-        st.divider()
-        st.write("**部署提示**")
-        st.caption("上线时请把 EM_API_KEY 放到 Streamlit Cloud 的 Secrets 面板里。")
+        st.caption(ENDPOINT_SPECS[endpoint_key].description)
+        values = build_form_values(endpoint_key)
 
-    if run_btn:
-        api_key = get_api_key(api_key_input)
-        if not api_key:
-            st.error("没有找到 API Key。请填写左侧输入框，或在 Secrets / EM_API_KEY 中配置。")
+        custom_json = st.checkbox("使用自定义 JSON 覆盖", value=False)
+        custom_json_text = ""
+        if custom_json:
+            default_payload = build_payload(endpoint_key, values)
+            custom_json_text = st.text_area(
+                "自定义请求体",
+                value=json.dumps(default_payload, ensure_ascii=False, indent=2),
+                height=220,
+            )
+
+        show_raw = st.checkbox("显示原始事件/响应", value=True)
+        debug_mode = st.checkbox("调试模式", value=False)
+        submit = st.button("开始请求", type="primary", use_container_width=True)
+        st.divider()
+        st.write("**接口速览**")
+        st.write("- `/poc/stream/ask`：流式问答，含 `METADATA`、`TEXT`、`REF_INDEX`、`GRAPH`、`FINAL_TEXT`、`FINISH`")
+        st.write("- `/poc/ask`：一次性问答，返回 `displayData` 和 `refIndexList`")
+        st.write("- `/poc/stream/security`：股票诊断")
+        st.write("- `/poc/stream/tougu-company`：个股涨跌分析")
+        st.write("- `/poc/stream/tougu-block`：行业/概念涨跌分析")
+        st.write("- `/poc/stream/scenario-news`：热点/行业/股票资讯总结")
+
+    latest = st.session_state.last_result
+
+    if submit:
+        if not api_key.strip():
+            st.error("请先填写 API Key。")
             return
 
-        with st.status("正在连接妙想接口...", expanded=True):
-            result = fetch_stream(
-                api_key=api_key,
-                question=question.strip(),
-                deep_think=deep_think,
-                channel_id=channel_id.strip(),
-            )
+        try:
+            payload = json.loads(custom_json_text) if custom_json else build_payload(endpoint_key, values)
+            if not isinstance(payload, dict):
+                raise ValueError("请求体必须是 JSON 对象")
+        except Exception as exc:
+            st.error(f"请求体解析失败：{exc}")
+            return
+
+        status_slot = st.empty()
+        meta_slot = st.empty()
+        answer_slot = st.empty()
+        chunks_slot = st.empty()
+        graph_slot = st.empty()
+
+        def on_event(event: dict[str, Any], state: dict[str, Any]) -> None:
+            message_type = event.get("messageType", "")
+            if message_type == "METADATA":
+                meta_slot.json(
+                    {
+                        "channelId": state.get("channel_id", ""),
+                        "qId": state.get("q_id", ""),
+                        "warning": state.get("warning", ""),
+                    }
+                )
+                status_slot.info("收到 METADATA，正在继续接收流式内容。")
+            elif message_type == "TEXT":
+                live_text = merge_text(state.get("text_chunks", []))
+                answer_slot.markdown(live_text or "...")
+                chunks_slot.code("\n".join(state.get("text_chunks", [])) or "(暂无片段)", language="text")
+            elif message_type == "FINAL_TEXT":
+                final_text = state.get("final_text", "") or merge_text(state.get("text_chunks", []))
+                answer_slot.markdown(final_text or "(暂无最终文本)")
+                status_slot.success("收到 FINAL_TEXT。")
+            elif message_type == "REF_INDEX":
+                status_slot.info(f"收到 {len(event.get('refIndexList', []))} 条溯源。")
+            elif message_type == "NEWS_INDEX":
+                status_slot.info(f"收到 {len(event.get('newsIndexList', []))} 条资讯溯源。")
+            elif message_type == "GRAPH":
+                graph_slot.json(event)
+            elif message_type == "ERROR":
+                status_slot.error(state.get("error", "接口返回错误"))
+
+        with st.status("正在请求妙想接口...", expanded=True) as status_box:
+            if ENDPOINT_SPECS[endpoint_key].mode == "stream":
+                result = stream_request(
+                    api_key.strip(),
+                    endpoint_key,
+                    payload,
+                    debug=debug_mode,
+                    on_event=on_event,
+                )
+            else:
+                result = json_request(api_key.strip(), endpoint_key, payload)
+
+            if result.get("error"):
+                status_box.update(label="请求失败", state="error")
+            else:
+                status_box.update(label="请求完成", state="complete")
 
         if result.get("channel_id"):
             st.session_state.last_channel_id = result["channel_id"]
         st.session_state.last_result = result
         st.session_state.history.insert(0, result)
         st.session_state.history = st.session_state.history[:MAX_HISTORY]
-
-    latest = st.session_state.last_result
+        latest = result
 
     if latest:
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("接口", ENDPOINT_SPECS[latest.get("endpoint_key", "stream_ask")].label)
+        with c2:
             st.metric("HTTP", latest.get("http_status") or "-")
-        with col2:
-            st.metric("channelId", latest.get("channel_id") or "未返回")
-        with col3:
-            st.metric("研报引用数", len(latest.get("ref_index_list", [])))
-        with col4:
-            st.metric("原始事件数", len(latest.get("raw_events", [])))
+        with c3:
+            if latest.get("endpoint_key") == "ask":
+                st.metric("code", latest.get("code") or "-")
+            else:
+                st.metric("channelId", latest.get("channel_id") or "未返回")
+        with c4:
+            if latest.get("endpoint_key") == "ask":
+                st.metric("溯源数", len(latest.get("ref_index_list", [])))
+            else:
+                st.metric("原始事件数", len(latest.get("raw_events", [])))
 
-        left, right = st.columns([1.15, 1])
+        left, right = st.columns([1.1, 0.95])
 
         with left:
-            st.subheader("实时回答")
-            if latest.get("error"):
-                st.error(latest["error"])
-
-            st.write("**请求体**")
-            st.code(json.dumps(latest.get("payload", {}), ensure_ascii=False, indent=2), language="json")
-
-            st.write("**会话信息**")
-            st.json(
-                {
-                    "channelId": latest.get("channel_id", ""),
-                    "qId": latest.get("q_id", ""),
-                    "traceId": latest.get("trace_id", ""),
-                    "warning": latest.get("warning", ""),
-                }
-            )
-
-            final_text = latest.get("final_text") or merge_text(latest.get("text_chunks", []))
-            if final_text:
-                prefix, think_text, suffix = split_think_block(final_text)
-                answer_text = " ".join(part for part in [prefix, suffix] if part).strip()
-                if think_text:
-                    st.write("**思考内容**")
-                    st.info(think_text)
-                    st.write("**最终回答**")
-                    st.markdown(answer_text or "(无可展示最终回答)")
-                else:
-                    st.write("**最终回答**")
-                    st.markdown(final_text)
+            st.subheader("输出")
+            if latest.get("endpoint_key") == "ask":
+                render_json_state(latest, show_raw)
             else:
-                st.info("还没有可展示的文本。")
-
-            with st.expander("流式片段", expanded=False):
-                st.code("\n".join(latest.get("text_chunks", [])) or "(无片段)", language="text")
-
-            st.download_button(
-                "下载本次 JSON",
-                data=json.dumps(latest, ensure_ascii=False, indent=2),
-                file_name="miaoxiang_result.json",
-                mime="application/json",
-                use_container_width=True,
-            )
+                render_stream_state(latest, show_raw, debug_mode)
 
         with right:
             st.subheader("溯源与结构化信息")
-            render_sources("研报溯源", latest.get("ref_index_list", []), "这次请求没有返回研报溯源。")
-            render_sources("资讯溯源", latest.get("news_index_list", []), "这次请求没有返回资讯溯源。")
+            render_index_items(
+                "REF_INDEX / 研报与资讯溯源",
+                latest.get("ref_index_list", []),
+                kind="ref",
+                empty_tip="当前没有返回 REF_INDEX。",
+            )
+            render_index_items(
+                "NEWS_INDEX / 资讯溯源",
+                latest.get("news_index_list", []),
+                kind="news",
+                empty_tip="当前没有返回 NEWS_INDEX。",
+            )
             render_graph_events(latest.get("graph_events", []))
-            if show_raw:
-                st.subheader("原始事件")
-                st.json(latest.get("raw_events", []))
     else:
-        st.info("先填密钥、选问题，然后点击“开始请求”。")
+        st.info("先在左侧选择接口、填参数，再点击“开始请求”。")
 
     st.divider()
     st.subheader("最近请求")
     if st.session_state.history:
         for idx, item in enumerate(st.session_state.history, start=1):
-            title = item.get("payload", {}).get("question", "(无问题)")
+            title = item.get("payload", {}).get("question") or item.get("payload", {}).get("entity") or item.get("endpoint_key", "")
             with st.expander(f"{idx}. {title}", expanded=False):
                 st.write(
                     {
+                        "endpoint": item.get("endpoint_key", ""),
                         "channelId": item.get("channel_id", ""),
                         "qId": item.get("q_id", ""),
                         "traceId": item.get("trace_id", ""),
+                        "code": item.get("code", ""),
+                        "httpStatus": item.get("http_status", ""),
                     }
                 )
                 st.code(json.dumps(item.get("payload", {}), ensure_ascii=False, indent=2), language="json")
     else:
-        st.caption("这里会保留最近 5 次请求，方便对比和调试。")
+        st.caption("这里会保留最近 8 次请求，方便对比不同接口的输出。")
+
+
+def summarize_event(event: dict[str, Any]) -> str:
+    message_type = event.get("messageType", "UNKNOWN")
+    if message_type == "TEXT":
+        return f"TEXT: {shorten(event.get('text', ''), 60)}"
+    if message_type == "FINAL_TEXT":
+        return "FINAL_TEXT"
+    if message_type == "REF_INDEX":
+        return f"REF_INDEX: {len(event.get('refIndexList', []))}"
+    if message_type == "NEWS_INDEX":
+        return f"NEWS_INDEX: {len(event.get('newsIndexList', []))}"
+    if message_type == "GRAPH":
+        return "GRAPH"
+    if message_type == "METADATA":
+        return f"METADATA: channelId={event.get('channelId', '')}"
+    if message_type == "FINISH":
+        return f"FINISH: traceId={event.get('traceId', '')}"
+    if message_type == "ERROR":
+        return f"ERROR: {event.get('reason', '')}"
+    return message_type
+
+
+def cli_main() -> None:
+    parser = argparse.ArgumentParser(description="妙想接口调试 CLI")
+    parser.add_argument("--cli", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--json-cli", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--endpoint", default="stream_ask", choices=list(ENDPOINT_SPECS.keys()))
+    parser.add_argument("--api-key", default=DEFAULT_API_KEY)
+    parser.add_argument("--payload-json", default="", help="直接指定完整请求体 JSON")
+    parser.add_argument("--question", default="你是谁")
+    parser.add_argument("--deep-think", action="store_true")
+    parser.add_argument("--channel-id", default="")
+    parser.add_argument("--entity", default="")
+    parser.add_argument("--type", default="")
+    parser.add_argument("--industry", default="")
+    parser.add_argument("--scenario", default="")
+    parser.add_argument("--info-type", default="")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--show-raw", action="store_true")
+    args = parser.parse_args()
+
+    if not args.api_key.strip():
+        print("请先设置 EM_API_KEY，或者通过 --api-key 传入。")
+        sys.exit(1)
+
+    if args.payload_json.strip():
+        payload = json.loads(args.payload_json)
+    else:
+        values: dict[str, Any] = {}
+        if args.endpoint in {"stream_ask", "ask"}:
+            values = {
+                "question": args.question,
+                "deepThink": args.deep_think,
+                "channelId": args.channel_id,
+            }
+        elif args.endpoint == "security":
+            values = {
+                "entity": args.entity or "603391",
+                "type": int(args.type or 1),
+                "industry": int(args.industry) if args.industry not in ("", None) else 0,
+            }
+        elif args.endpoint in {"tougu_company", "tougu_block"}:
+            values = {
+                "entity": args.entity or ("603391" if args.endpoint == "tougu_company" else "半导体"),
+                "industry": int(args.industry) if args.industry not in ("", None) else 0,
+            }
+        elif args.endpoint == "scenario_news":
+            values = {"scenario": int(args.scenario or 1)}
+            if values["scenario"] in (2, 3):
+                values["entity"] = args.entity or "东方财富"
+            if values["scenario"] == 1:
+                values["type"] = int(args.type or 1)
+                if args.info_type:
+                    values["infoType"] = args.info_type
+        payload = build_payload(args.endpoint, values)
+
+    if args.endpoint == "ask":
+        result = json_request(args.api_key.strip(), args.endpoint, payload)
+    else:
+        result = stream_request(args.api_key.strip(), args.endpoint, payload, debug=args.debug)
+
+    if args.debug:
+        print("=== 请求体 ===")
+        print(json.dumps(result.get("payload", {}), ensure_ascii=False, indent=2))
+        print("=== 事件摘要 ===")
+        for event in result.get("raw_events", []):
+            print(summarize_event(event))
+
+    if result.get("error"):
+        print("=== 错误 ===")
+        print(result["error"])
+
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def main() -> None:
+    if any(arg in sys.argv for arg in ("--cli", "--json-cli")):
+        cli_main()
+        return
+
+    if ensure_streamlit_loaded() is None:
+        print("当前环境没有安装 streamlit。请先执行 pip install -r requirements.txt")
+        return
+
+    render_app()
 
 
 if __name__ == "__main__":
     main()
+
