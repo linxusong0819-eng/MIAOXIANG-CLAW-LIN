@@ -107,6 +107,11 @@ DEMO_CASES: dict[str, dict[str, Any]] = {
         "type": 4,
         "infoType": "",
     },
+    "资讯总结（股票消息）": {
+        "endpoint": "scenario_news",
+        "scenario": 3,
+        "entity": "东方财富",
+    },
 }
 
 
@@ -793,7 +798,7 @@ def render_app() -> None:
 
     with st.sidebar:
         st.header("请求配置")
-        demo_name = st.selectbox("展示案例", list(DEMO_CASES.keys()), index=5)
+        demo_name = st.selectbox("展示案例", list(DEMO_CASES.keys()), index=6)
         demo = DEMO_CASES[demo_name]
         api_key = st.text_input(
             "API Key",
