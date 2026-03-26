@@ -391,6 +391,7 @@ def build_reference_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "type": item.get("type", "-"),
                 "referenceType": item.get("referenceType", "-"),
                 "title": item.get("title", "") or item.get("name", "") or "-",
+                "source": item.get("source", "") or "",
                 "jumpUrl": safe_link(item.get("jumpUrl")),
                 "hasMarkdown": bool(item.get("markdown")),
                 "publishDate": item.get("publishDate", item.get("date", "")),
@@ -601,6 +602,21 @@ def render_stream_state(latest: dict[str, Any], show_raw: bool, debug_mode: bool
             st.markdown(final_text)
     else:
         st.info("还没有收到可展示的文本内容。")
+
+    news_index_list = latest.get("news_index_list", [])
+    if news_index_list:
+        st.success(f"本次返回 {len(news_index_list)} 条资讯溯源，下面先展示前 3 条，完整列表在右侧。")
+        preview_rows = []
+        for item in news_index_list[:3]:
+            preview_rows.append(
+                {
+                    "标题": item.get("title", ""),
+                    "来源": item.get("source", ""),
+                    "发布时间": item.get("publishDate", ""),
+                    "链接": item.get("jumpUrl", ""),
+                }
+            )
+        st.dataframe(preview_rows, use_container_width=True, hide_index=True)
 
     with st.expander("流式片段", expanded=False):
         st.code("\n".join(latest.get("text_chunks", [])) or "(暂无片段)", language="text")
