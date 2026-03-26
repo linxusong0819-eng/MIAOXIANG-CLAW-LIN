@@ -814,7 +814,11 @@ def render_app() -> None:
 
     with st.sidebar:
         st.header("请求配置")
-        demo_name = st.selectbox("展示案例", list(DEMO_CASES.keys()), index=6)
+        demo_name = st.radio(
+            "展示案例",
+            list(DEMO_CASES.keys()),
+            index=6,
+        )
         demo = DEMO_CASES[demo_name]
         api_key = st.text_input(
             "API Key",
