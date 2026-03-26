@@ -78,6 +78,37 @@ ENDPOINT_SPECS: dict[str, EndpointSpec] = {
     ),
 }
 
+DEMO_CASES: dict[str, dict[str, Any]] = {
+    "自定义": {},
+    "研报总结（流式）": {
+        "endpoint": "stream_ask",
+        "question": "请总结东方财富近3个月的研报核心观点，并给出投资建议和风险提示",
+        "deepThink": True,
+    },
+    "图表演示（估值变化）": {
+        "endpoint": "stream_ask",
+        "question": "请分析东方财富当前市盈率，并用图表展示估值变化",
+        "deepThink": True,
+    },
+    "图表演示（研报观点）": {
+        "endpoint": "stream_ask",
+        "question": "请用图表展示东方财富近三个月研报观点的变化",
+        "deepThink": True,
+    },
+    "股票诊断（基本面）": {
+        "endpoint": "security",
+        "entity": "603391",
+        "type": 1,
+        "industry": 0,
+    },
+    "资讯总结（热点发现）": {
+        "endpoint": "scenario_news",
+        "scenario": 1,
+        "type": 4,
+        "infoType": "",
+    },
+}
+
 
 def ensure_streamlit_loaded() -> Any | None:
     global st
@@ -483,7 +514,7 @@ def render_index_items(title: str, items: list[dict[str, Any]], *, kind: str, em
 def render_graph_events(events: list[dict[str, Any]]) -> None:
     st.subheader("图表消息")
     if not events:
-        st.info("当前没有返回图表消息。")
+        st.info("当前没有返回图表消息。若想看图表，请切到“图表演示（估值变化）”或“图表演示（研报观点）”。")
         return
 
     for idx, event in enumerate(events, start=1):
@@ -625,18 +656,27 @@ def render_json_state(latest: dict[str, Any], show_raw: bool) -> None:
             st.json(latest.get("raw_events", []))
 
 
-def build_form_values(endpoint_key: str) -> dict[str, Any]:
+def build_form_values(endpoint_key: str, preset: dict[str, Any] | None = None) -> dict[str, Any]:
+    preset = preset or {}
     if endpoint_key in {"stream_ask", "ask"}:
         return {
             "question": st.text_area(
                 "问题",
-                value="请总结东方财富近3个月的研报核心观点，并给出投资建议和风险提示",
+                value=str(
+                    preset.get(
+                        "question",
+                        "请分析东方财富当前市盈率，并用图表展示估值变化",
+                    )
+                ),
                 height=140,
             ),
-            "deepThink": st.checkbox("开启深度思考", value=True),
+            "deepThink": st.checkbox(
+                "开启深度思考",
+                value=bool(preset.get("deepThink", True)),
+            ),
             "channelId": st.text_input(
                 "channelId（流式多轮可选）",
-                value=st.session_state.get("last_channel_id", ""),
+                value=str(preset.get("channelId", st.session_state.get("last_channel_id", ""))),
             ),
         }
 
@@ -656,9 +696,9 @@ def build_form_values(endpoint_key: str) -> dict[str, Any]:
         type_label = st.selectbox("type", list(type_options.keys()), index=0)
         industry_label = st.selectbox("industry", list(industry_options.keys()), index=0)
         return {
-            "entity": st.text_input("entity", value="603391"),
-            "type": type_options[type_label],
-            "industry": industry_options[industry_label],
+            "entity": st.text_input("entity", value=str(preset.get("entity", "603391"))),
+            "type": int(preset.get("type", type_options[type_label])),
+            "industry": int(preset.get("industry", industry_options[industry_label])),
         }
 
     if endpoint_key == "tougu_company":
@@ -668,8 +708,8 @@ def build_form_values(endpoint_key: str) -> dict[str, Any]:
         }
         industry_label = st.selectbox("industry", list(industry_options.keys()), index=0)
         return {
-            "entity": st.text_input("entity", value="603391"),
-            "industry": industry_options[industry_label],
+            "entity": st.text_input("entity", value=str(preset.get("entity", "603391"))),
+            "industry": int(preset.get("industry", industry_options[industry_label])),
         }
 
     if endpoint_key == "tougu_block":
@@ -679,8 +719,8 @@ def build_form_values(endpoint_key: str) -> dict[str, Any]:
         }
         industry_label = st.selectbox("industry", list(industry_options.keys()), index=0)
         return {
-            "entity": st.text_input("entity", value="半导体"),
-            "industry": industry_options[industry_label],
+            "entity": st.text_input("entity", value=str(preset.get("entity", "半导体"))),
+            "industry": int(preset.get("industry", industry_options[industry_label])),
         }
 
     if endpoint_key == "scenario_news":
@@ -689,11 +729,16 @@ def build_form_values(endpoint_key: str) -> dict[str, Any]:
             "2 - 行业消息": 2,
             "3 - 股票消息": 3,
         }
-        scenario_label = st.selectbox("scenario", list(scenario_map.keys()), index=0)
-        scenario_value = scenario_map[scenario_label]
+        scenario_value = int(preset.get("scenario", 1))
+        scenario_label = st.selectbox(
+            "scenario",
+            list(scenario_map.keys()),
+            index=max(0, list(scenario_map.values()).index(scenario_value) if scenario_value in scenario_map.values() else 0),
+        )
+        scenario_value = int(preset.get("scenario", scenario_map[scenario_label]))
         payload: dict[str, Any] = {"scenario": scenario_value}
         if scenario_value in (2, 3):
-            payload["entity"] = st.text_input("entity", value="东方财富")
+            payload["entity"] = st.text_input("entity", value=str(preset.get("entity", "东方财富")))
         if scenario_value == 1:
             type_map = {
                 "1 - 热门资讯": 1,
@@ -701,11 +746,16 @@ def build_form_values(endpoint_key: str) -> dict[str, Any]:
                 "3 - 热门个股": 3,
                 "4 - 热门板块": 4,
             }
-            type_label = st.selectbox("type", list(type_map.keys()), index=0)
-            payload["type"] = type_map[type_label]
+            type_value = int(preset.get("type", 1))
+            type_label = st.selectbox(
+                "type",
+                list(type_map.keys()),
+                index=max(0, list(type_map.values()).index(type_value) if type_value in type_map.values() else 0),
+            )
+            payload["type"] = int(preset.get("type", type_map[type_label]))
             payload["infoType"] = st.text_input(
                 "infoType（可选，热门资讯时可限制 overseas）",
-                value="",
+                value=str(preset.get("infoType", "")),
             )
         return payload
 
@@ -738,20 +788,32 @@ def render_app() -> None:
 
     with st.sidebar:
         st.header("请求配置")
+        demo_name = st.selectbox("展示案例", list(DEMO_CASES.keys()), index=2)
+        demo = DEMO_CASES[demo_name]
         api_key = st.text_input(
             "API Key",
             value=get_default_api_key(),
             type="password",
             help="本地默认会预填你提供的 key；部署到云端时请改用 Secrets。",
         )
-        endpoint_key = st.selectbox(
-            "接口",
-            list(ENDPOINT_SPECS.keys()),
-            format_func=lambda key: ENDPOINT_SPECS[key].label,
-            index=0,
-        )
+        endpoint_key = str(demo.get("endpoint", "stream_ask")) or "stream_ask"
+        if demo_name == "自定义":
+            endpoint_key = st.selectbox(
+                "接口",
+                list(ENDPOINT_SPECS.keys()),
+                format_func=lambda key: ENDPOINT_SPECS[key].label,
+                index=0,
+            )
+        else:
+            st.selectbox(
+                "接口",
+                list(ENDPOINT_SPECS.keys()),
+                format_func=lambda key: ENDPOINT_SPECS[key].label,
+                index=list(ENDPOINT_SPECS.keys()).index(endpoint_key),
+                disabled=True,
+            )
         st.caption(ENDPOINT_SPECS[endpoint_key].description)
-        values = build_form_values(endpoint_key)
+        values = build_form_values(endpoint_key, demo if demo_name != "自定义" else None)
 
         custom_json = st.checkbox("使用自定义 JSON 覆盖", value=False)
         custom_json_text = ""
